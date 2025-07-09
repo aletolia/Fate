@@ -88,18 +88,12 @@ class HierarchicalTaskMoE(nn.Module):
         ])
 
     def forward(self, hidden_states: torch.Tensor, task_id: int):
-        # input format: [B, T, D] or [B, D]
-        is_2d_input = hidden_states.dim() == 2
-        if is_2d_input:
-            hidden_states = hidden_states.unsqueeze(1)
-            
         bsz, seq_len, dim = hidden_states.shape
         task_vec = self.task_emb.weight[task_id]
 
-        # experts specific to the task
         task_expert_scores = self.task_router(task_vec)
         _, task_expert_indices = torch.topk(task_expert_scores, self.num_task_experts, sorted=False)
-        # generalist experts
+
         generalist_indices = torch.arange(
             self.num_experts - self.num_generalists, self.num_experts, device=hidden_states.device
         )
