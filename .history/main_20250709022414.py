@@ -34,6 +34,8 @@ def cross_validation_loop(
     model_class: type, 
     model_config: Any, 
     flags: TrainingFlags,
+    h5_data_dir: str,
+    csv_label_path: str
     ):
     """Main loop for k-fold cross-validation."""
     # --- Setup ---

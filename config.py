@@ -5,7 +5,7 @@ import torch.nn as nn
 @dataclasses.dataclass
 class TrainingFlags:
     # Multi-Task Options
-    loss_weighting_strategy: str = "dwa"
+    loss_weighting_strategy: str = "mgda"
     use_pcgrad: bool = True
     use_diversity_reg: bool = False
     diversity_beta: float = 1e-4

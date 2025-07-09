@@ -195,6 +195,8 @@ def multi_head_attention_forward(
     B, Tq, D = query.shape
     Tkv = key.shape[1]
     head_dim = embed_dim // num_heads
+    if head_dim * num_heads != embed_dim:
+        raise ValueError("embed_dim 必须能被 num_heads 整除")
 
     q = q_proj(query)
     k = k_proj(key)
@@ -205,6 +207,7 @@ def multi_head_attention_forward(
     v = v.view(B, Tkv, num_heads, head_dim).transpose(1, 2) 
     
     if attn_mask is not None and attn_mask.ndim == 2: 
+         
          attn_mask = attn_mask.unsqueeze(1).unsqueeze(2) 
 
     attn_output = F.scaled_dot_product_attention(
@@ -379,136 +382,6 @@ class ProposedFusionModule(nn.Module):
         final_output = self.final_pool(final_output)
 
         return final_output
-    
-# 备用方案 1
-# Pyramid Fusion Module
-class MultiScaleFusionModule(nn.Module):
-    """
-    Implements fusion using multi-scale compressors to capture features at different resolutions.
-    """
-    def __init__(self,
-                 dim: int = 768,
-                 latent_scales: List[int] = [64, 128, 256], # A list of different num_latents
-                 compress_heads: int = 8,
-                 film_hidden_dim: Optional[int] = None,
-                 fusion_heads: int = 8,
-                 dropout: float = 0.1):
-        super().__init__()
-        
-        self.compressors = nn.ModuleList(
-            [PerceiverIOCompressor(dim, num_latents, compress_heads, dropout) for num_latents in latent_scales]
-        )
-        merged_dim = dim * len(latent_scales)
-        
-        self.merge_projection = nn.Sequential(
-            nn.Linear(merged_dim, dim),
-            nn.LayerNorm(dim)
-        )
-        
-        self.film_modulator = FiLMLayer(dim, dim, film_hidden_dim)
-        self.fusion_cross_attention = CrossAttentionLayer(dim, fusion_heads, dropout)
-
-    def forward(self,
-                i2r_att: torch.Tensor,
-                r2i_att: torch.Tensor,
-                i2r_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
-        # 1. Compress the input i2r_att at multiple scales in parallel
-        multi_scale_latents = [compressor(i2r_att, i2r_mask) for compressor in self.compressors]
-        
-        # 2. Concatenate the results along the sequence dimension
-        # Before: [(B, 64, D), (B, 128, D), (B, 256, D)]
-        # After: (B, 64 + 128 + 256, D)
-        concatenated_latents = torch.cat(multi_scale_latents, dim=1)
-        
-        # 3. Project the merged representation back to the original dimension
-        # This step learns to effectively combine the different scales
-        merged_representation = self.merge_projection(concatenated_latents)
-        
-        # 4. Modulate the multi-scale representation using FiLM
-        modulated_representation = self.film_modulator(merged_representation, r2i_att)
-        
-        # 5. Final fusion using cross-attention
-        fused_representation = self.fusion_cross_attention(
-            query=r2i_att,
-            kv=modulated_representation,
-        )
-        
-        return fused_representation.squeeze(1)
-# 备用方案 2
-# token2token fusion
-class TokenToTokenFiLMLayer(nn.Module):
-    """
-    Applies FiLM modulation in a token-to-token fashion using cross-attention.
-    Each target token queries the generated modulation parameters.
-    """
-    def __init__(self, target_dim: int, condition_dim: int, num_heads: int = 8, dropout: float = 0.1):
-        super().__init__()
-        self.target_dim = target_dim
-        
-        # Generator now produces a sequence of modulation parameters
-        self.generator = nn.Linear(condition_dim, 2 * target_dim)
-        
-        # Cross-attention to align target tokens with modulation parameters
-        self.attention = CrossAttentionLayer(target_dim, num_heads, dropout)
-
-    def forward(self, target_features: torch.Tensor, condition_features: torch.Tensor) -> torch.Tensor:
-        # target_features: (B, N, D_target) -> The sequence to be modulated
-        # condition_features: (B, S, D_cond) -> The sequence providing context
-        
-        # 1. Generate a sequence of modulation parameters (gammas and betas) from condition_features
-        # The sequence length 'S' of the condition is preserved
-        mod_params = self.generator(condition_features) # (B, S, 2 * D_target)
-        gammas = mod_params[..., :self.target_dim]     # (B, S, D_target)
-        betas = mod_params[..., self.target_dim:]      # (B, S, D_target)
-        
-        # 2. Use attention to create custom modulation for each target token
-        # Query: Each token in the target sequence
-        # Key/Value: The sequence of generated gammas and betas
-        aligned_gammas = self.attention(query=target_features, kv=gammas)
-        aligned_betas = self.attention(query=target_features, kv=betas)
-        
-        # 3. Apply the fine-grained, aligned modulation
-        modulated_features = target_features * (1 + aligned_gammas) + aligned_betas
-        return modulated_features
-
-class TokenToTokenFusionModule(nn.Module):
-    def __init__(self,
-                 dim: int = 768,
-                 num_latents: int = 512,
-                 compress_heads: int = 8,
-                 fusion_heads: int = 8,
-                 dropout: float = 0.1):
-        super().__init__()
-        self.compressor = PerceiverIOCompressor(dim, num_latents, compress_heads, dropout)
-        
-        # Use the new, more powerful FiLM layer
-        self.film_modulator = TokenToTokenFiLMLayer(dim, dim, fusion_heads, dropout)
-        
-        self.fusion_cross_attention = CrossAttentionLayer(dim, fusion_heads, dropout)
-
-    def forward(self,
-                i2r_att: torch.Tensor,
-                r2i_att: torch.Tensor,
-                i2r_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
-        # 1. Compress i2r_att (same as before)
-        compressed_i2r = self.compressor(i2r_att, i2r_mask)
-        
-        # 2. Modulate using the token-to-token mechanism
-        # Each token in `compressed_i2r` will query `r2i_att` to get its own gamma/beta
-        modulated_i2r = self.film_modulator(
-            target_features=compressed_i2r, 
-            condition_features=r2i_att
-        )
-        
-        # 3. Final fusion (same as before)
-        fused_representation = self.fusion_cross_attention(
-            query=r2i_att,
-            kv=modulated_i2r,
-        )
-        
-        return fused_representation.squeeze(1)
 # ==========================
 # ===== dataset utils ======
 # ==========================
