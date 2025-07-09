@@ -6,23 +6,6 @@ from MoE import HierarchicalTaskMoE as DeepseekMoE_TaskSpecificExperts
 from attn import Fate
 from utils import ProposedFusionModule
 
-# MTAN from https://github.com/lorenmt/mtan
-class TaskSpecificAttentionLayer(nn.Module):
-    def __init__(self, dim: int, att_hidden_dim: Optional[int] = None):
-        super().__init__()
-        if att_hidden_dim is None:
-            att_hidden_dim = dim // 2
-
-        self.attention_net = nn.Sequential(
-            nn.Linear(dim, att_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(att_hidden_dim, dim),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.attention_net(x)
-
 class MultiTaskModelWithPerTaskFusion(nn.Module):
     def __init__(
         self,
@@ -32,6 +15,10 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         hidden_dim: int = 768,
         num_tasks: int = 4,
         dropout: float = 0.3,
+        # For possible future use:
+        # prompt_length: int = 32,
+        # prompt_type: str = "input",
+        # learnt_p: bool = True,
         residual_mode: str = "identity",
         fusion_mode: str = "identity",
         num_latents: int = 512,
@@ -65,7 +52,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
                     text_dim=text_dim if i == 0 else hidden_dim,
                     dim=hidden_dim,
                     layer_idx=i, total_layers=num_layers,
-                    residual_mode=residual_mode, fusion_mode=fusion_mode,
+                    residual_mode=residual_mode, fusion_mode=fusion_mode, # Fusion inside Fate is kept
                     num_tasks=num_tasks, use_task_norm=use_task_norm,
                     heads=fusion_heads, dropout=dropout, num_ts_tokens=0,
                     learn_ts_tokens=False, add_ts_tokens_in_first_half=False,
@@ -83,11 +70,6 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             fusion_heads=fusion_heads,
             dropout=dropout
         )
-
-        self.mtan_attention_layers = nn.ModuleList(
-            [TaskSpecificAttentionLayer(dim=hidden_dim) for _ in range(self.num_tasks)]
-        )
-
         # MoE Layers
         self.post_fusion_moe = DeepseekMoE_TaskSpecificExperts(
             config, num_tasks=self.num_tasks, expert_mode=expert_mode_attr
@@ -115,7 +97,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         cur_img, cur_txt = img_features, text_feats
         final_attn_outputs: Optional[Dict[str, torch.Tensor]] = None
 
-        # Caculate attention outputs
+        # Cacaulate attention outputs
         for i, block in enumerate(self.cross_attn_layers):
             attn_out = block(img_features=cur_img, text_feats=cur_txt)
             final_attn_outputs = attn_out
@@ -141,12 +123,10 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             )
 
             for t in range(self.num_tasks):
-                # MTAN
-                attention_mask = self.mtan_attention_layers[t](shared_fused_feature)
-                task_attended_feature = shared_fused_feature * attention_mask
-                # MoE
-                expert_output = self.post_fusion_moe(task_attended_feature, task_id=t)
-                task_specific_feature = task_attended_feature + expert_output
+                expert_output = self.post_fusion_moe(shared_fused_feature, task_id=t)
+                
+                # residual connection
+                task_specific_feature = shared_fused_feature + expert_output
                 task_feats.append(task_specific_feature)
 
         else:

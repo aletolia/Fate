@@ -6,21 +6,30 @@ from MoE import HierarchicalTaskMoE as DeepseekMoE_TaskSpecificExperts
 from attn import Fate
 from utils import ProposedFusionModule
 
-# MTAN from https://github.com/lorenmt/mtan
 class TaskSpecificAttentionLayer(nn.Module):
+    """
+    MTAN (Multi-Task Attention Network) 模块。
+    为每个任务生成一个注意力掩码，并将其应用于共享特征。
+    这使得模型能够为特定任务“关注”特征中最重要的部分。
+    """
     def __init__(self, dim: int, att_hidden_dim: Optional[int] = None):
         super().__init__()
         if att_hidden_dim is None:
-            att_hidden_dim = dim // 2
+            att_hidden_dim = dim // 2 # 使用一个较小的隐藏维度来减少参数
 
         self.attention_net = nn.Sequential(
             nn.Linear(dim, att_hidden_dim),
             nn.ReLU(),
             nn.Linear(att_hidden_dim, dim),
-            nn.Sigmoid()
+            nn.Sigmoid() # Sigmoid确保输出在0-1之间，作为注意力权重
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        生成注意力掩码。
+        输入 x: [batch_size, feature_dim]
+        输出: [batch_size, feature_dim] (注意力掩码)
+        """
         return self.attention_net(x)
 
 class MultiTaskModelWithPerTaskFusion(nn.Module):
@@ -84,6 +93,9 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             dropout=dropout
         )
 
+        # ==============================================================================
+        # 2. 新增: 为每个任务创建独立的 MTAN 注意力模块
+        # ==============================================================================
         self.mtan_attention_layers = nn.ModuleList(
             [TaskSpecificAttentionLayer(dim=hidden_dim) for _ in range(self.num_tasks)]
         )
@@ -134,18 +146,26 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             i2r_outputs = final_attn_outputs['img_to_text']
             r2i_outputs = final_attn_outputs['text_to_img']
 
-            # Fusion
+            # Fusion: 生成一个所有任务共享的融合特征
             shared_fused_feature = self.shared_fusion_module(
                 i2r_att=i2r_outputs,
                 r2i_att=r2i_outputs
             )
 
+            # ==============================================================================
+            # 3. 修改: 将 MTAN 插入到 Fusion 和 MoE 之间
+            # ==============================================================================
             for t in range(self.num_tasks):
-                # MTAN
+                # 步骤 A: 使用任务 t 专属的注意力模块生成注意力掩码
                 attention_mask = self.mtan_attention_layers[t](shared_fused_feature)
+                
+                # 步骤 B: 将掩码应用于共享特征，得到任务特化的特征
                 task_attended_feature = shared_fused_feature * attention_mask
-                # MoE
+                
+                # 步骤 C: 将任务特化的特征送入 MoE 模块
                 expert_output = self.post_fusion_moe(task_attended_feature, task_id=t)
+                
+                # 步骤 D: 添加残差连接。注意，现在是与经过注意力加权的特征相加
                 task_specific_feature = task_attended_feature + expert_output
                 task_feats.append(task_specific_feature)
 
@@ -184,6 +204,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         epoch: int = 0,
         dwa_weights: Optional[List[float]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # (这部分代码无需改动)
         task_losses = []
         for t, (logit, label) in enumerate(zip(logits_list, labels_list)):
             if logit is None or logit.numel() == 0:
