@@ -37,6 +37,11 @@ def run_epoch(
 
     pbar = tqdm(dataloader, desc=f"{'Train' if is_training else 'Val'}", leave=False)
     error_log = []
+    
+    # For calculating running accuracy for all tasks
+    running_corrects = {name: 0 for name in TASK_CONFIG["names"]}
+    total_samples = {name: 0 for name in TASK_CONFIG["names"]}
+
     for batch in pbar:
         try:
             # Move batch to device
@@ -59,8 +64,8 @@ def run_epoch(
                     task_losses = []
                     batch_losses_dict = {}
                     for i, task_name in enumerate(TASK_CONFIG["names"]):
-                        logits = model_output["logits"][i].squeeze()
-                        labels = batch[TASK_CONFIG["label_keys"][i]].float()
+                        logits = model_output["logits"][i].view(-1)
+                        labels = batch[TASK_CONFIG["label_keys"][i]].float().view(-1)
                         mask = (labels >= 0)
                         
                         if mask.any():
@@ -90,9 +95,25 @@ def run_epoch(
                 mask = (batch[TASK_CONFIG["label_keys"][TASK_CONFIG["names"].index(name)]] >= 0)
                 if mask.any():
                     labels = batch[TASK_CONFIG["label_keys"][TASK_CONFIG["names"].index(name)]][mask].cpu()
-                    preds = torch.sigmoid(model_output["logits"][TASK_CONFIG["names"].index(name)].squeeze()[mask]).cpu()
+                    preds = torch.sigmoid(model_output["logits"][TASK_CONFIG["names"].index(name)].view(-1)[mask]).cpu()
                     all_labels[name].append(labels)
                     all_preds[name].append(preds)
+
+                    running_corrects[name] += torch.sum((preds >= 0.5).int() == labels.int()).item()
+                    total_samples[name] += labels.size(0)
+                    
+            
+            # Update progress bar
+            postfix_dict = {'loss': loss.item()}
+            for name in TASK_CONFIG["names"]:
+                if total_samples[name] > 0:
+                    current_acc = running_corrects[name] / total_samples[name]
+                    postfix_dict[f'{name}_acc'] = f'{current_acc:.2%}'
+                    
+            pbar.set_postfix(**postfix_dict)
+            if is_training:
+                acc_str = ", ".join([f"{name}_acc: {postfix_dict[f'{name}_acc']}" for name in TASK_CONFIG["names"] if f'{name}_acc' in postfix_dict])
+                pbar.write(f"Batch {pbar.n}/{len(dataloader)} - {acc_str}")
         except Exception as e:
             error_log.append({
                 'file_path': batch.get('file_path', 'N/A'),

@@ -48,7 +48,7 @@ class MoEConfig:
         self,
         hidden_size: int = 768,
         moe_intermediate_size: int = 768,
-        num_experts: int = 32,                # Total number of experts
+        num_experts: int = 16,                # Total number of experts
         num_task_experts: int = 4,            # Number of task-specific experts to select
         num_generalists: int = 2,             # Number of generalist experts (shared across tasks)
         num_experts_per_tok: int = 4,         # Number of experts to route each token to (k)

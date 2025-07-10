@@ -70,7 +70,7 @@ def cross_validation_loop(
         val_loader = DataLoader(val_subset, batch_size=flags.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
         # --- Model, Optimizer, and Helpers Initialization ---
-        model = model_class(config=model_config, num_tasks=NUM_TASKS, use_uncertainty_weighting=(flags.loss_weighting_strategy == "uw")).to(device)
+        model = model_class(config=model_config, num_tasks=NUM_TASKS).to(device)
         optimizer = build_optimizer(model, flags)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer.original_optimizer if flags.use_pcgrad else optimizer, 'min', patience=3, factor=0.5, verbose=True)
         task_criteria = {name: crit.to(device) for name, crit in TASK_CONFIG["criteria"].items()}
@@ -91,7 +91,7 @@ def cross_validation_loop(
             log_payload.update({f"val/{k}": v for k, v in val_metrics.items()})
             wandb.log(log_payload, step=epoch)
 
-            print(f"Val Loss: {val_metrics['total_loss']:.4f} | Primary Task Val AUC: {val_metrics.get(f'{TASK_CONFIG["names"][0]}_auc', 0):.4f}")
+            print(f"Val Loss: {val_metrics['total_loss']:.4f} | Primary Task Val AUC: {val_metrics.get(TASK_CONFIG['names'][0] + '_auc', 0):.4f}")
             
             primary_val_loss = val_metrics['total_loss']
             scheduler.step(primary_val_loss)
@@ -192,9 +192,7 @@ def main():
         dataset=dataset,
         model_class=MultiTaskModelWithPerTaskFusion,
         model_config=model_config,
-        flags=flags,
-        h5_data_dir=args.h5_data_dir,
-        csv_label_path=args.csv_label_path
+        flags=flags
     )
     print("\nfinished cross-validation training successfully")
 

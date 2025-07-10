@@ -271,12 +271,14 @@ class CrossAttentionLayer(nn.Module):
 class MultiScaleLatentQueryFusion(nn.Module):
     def __init__(self,
                  dim: int = 768,
-                 latent_scales: List[int] = [64, 128, 256],
+                 latent_scales: List[int] = [64, 128, 256], # K_1, K_2, ...
+                 final_num_queries: int = 128,
                  fusion_heads: int = 8,
                  dropout: float = 0.1):
         super().__init__()
         self.latent_scales = latent_scales
-        # TODO:multi initialize way choose(kaiming or xavier) 
+
+        # TODO：初始化方式可选
         self.queries = nn.ParameterList(
             [nn.Parameter(torch.randn(1, n_queries, dim)) for n_queries in latent_scales]
         )
@@ -287,6 +289,11 @@ class MultiScaleLatentQueryFusion(nn.Module):
                 'cross_attn': CrossAttentionLayer(dim, fusion_heads, dropout),
                 'norm': nn.LayerNorm(dim)
             }))
+            
+        total_latents = sum(latent_scales)
+        
+        self.projection = nn.Linear(total_latents, final_num_queries)
+        self.final_norm = nn.LayerNorm(dim)
 
     def forward(self,
                 i2r_att: torch.Tensor,
@@ -295,8 +302,8 @@ class MultiScaleLatentQueryFusion(nn.Module):
                 r2i_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B = i2r_att.shape[0]
         multimodal_context = torch.cat([i2r_att, r2i_att], dim=1)
-        
         context_mask = None
+        
         if i2r_mask is not None and r2i_mask is not None:
             context_mask = torch.cat([i2r_mask, r2i_mask], dim=1)
 
@@ -314,8 +321,13 @@ class MultiScaleLatentQueryFusion(nn.Module):
 
         merged_output = torch.cat(scale_outputs, dim=1) # (B, sum(latent_scales), D)
 
-        return merged_output
-    
+        projected_output = self.projection(merged_output.transpose(1, 2))
+        projected_output = projected_output.transpose(1, 2) # (B, final_num_queries, D)
+        
+        projected_output = self.final_norm(projected_output)
+
+        return projected_output
+
 # ==========================
 # ===== dataset utils ======
 # ==========================

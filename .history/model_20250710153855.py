@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from MoE import HierarchicalTaskMoE as DeepseekMoE_TaskSpecificExperts
 from attn import Fate
 from utils import MultiScaleLatentQueryFusion
+from config import MoEConfig
 
 # MTAN from https://github.com/lorenmt/mtan
 class TaskSpecificAttentionLayer(nn.Module):
@@ -34,11 +35,11 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         dropout: float = 0.3,
         residual_mode: str = "identity",
         fusion_mode: str = "identity",
+        latent_scales: List[int] = [64, 128, 256],
         fusion_heads: int = 8,
         classification_type: str = "binary",
         use_uncertainty_weighting: bool = False,
         use_task_norm: bool = False,
-        latent_scales: List[int] = [64, 128, 256],
         config = None,
     ):
         super().__init__()
@@ -47,8 +48,8 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         self.num_tasks = num_tasks
         self.classification_type = classification_type
         self.hidden_dim = hidden_dim
-        self.latent_scales = latent_scales
         expert_mode_attr = getattr(config, 'expert_mode', 'both')
+        self.fused_dim = sum(latent_scales) * hidden_dim
 
         # Loss weighting
         self.use_uw = use_uncertainty_weighting
@@ -74,29 +75,38 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         # Fusion
         self.shared_fusion_module = MultiScaleLatentQueryFusion(
             dim=hidden_dim,
-            latent_scales=self.latent_scales,
+            latent_scales=latent_scales,
             fusion_heads=fusion_heads,
             dropout=dropout
         )
 
         self.mtan_attention_layers = nn.ModuleList(
-            [TaskSpecificAttentionLayer(dim=hidden_dim) for _ in range(self.num_tasks)]
+            [TaskSpecificAttentionLayer(dim=self.fused_dim) for _ in range(self.num_tasks)]
         )
 
         # MoE Layers
+        post_fusion_moe_config = MoEConfig(
+            hidden_size=self.fused_dim,
+            moe_intermediate_size=self.fused_dim,
+            num_experts=config.num_experts,
+            num_task_experts=config.num_task_experts,
+            num_generalists=config.num_generalists,
+            num_experts_per_tok=config.num_experts_per_tok,
+            aux_loss_alpha=config.aux_loss_alpha,
+            router_add_noise=config.router_add_noise,
+        )
         self.post_fusion_moe = DeepseekMoE_TaskSpecificExperts(
-            config, num_tasks=self.num_tasks
+            post_fusion_moe_config, num_tasks=self.num_tasks
         )
         
-        classifier_in_dim = sum(self.latent_scales) * hidden_dim
         if classification_type == "all":
             self.task_classifiers = nn.ModuleList()
             num_binary_tasks = 1
             for _ in range(num_binary_tasks):
-                self.task_classifiers.append(nn.Linear(classifier_in_dim, 1))
+                self.task_classifiers.append(nn.Linear(self.fused_dim, 1))
         else:
-            out_dim = 1 if classification_type == "binary" else hidden_dim
-            self.task_classifiers = nn.ModuleList([nn.Linear(classifier_in_dim, out_dim) for _ in range(num_tasks)])
+            out_dim = 1 if classification_type == "binary" else self.fused_dim
+            self.task_classifiers = nn.ModuleList([nn.Linear(self.fused_dim, out_dim) for _ in range(num_tasks)])
 
         self.num_layers = num_layers
         self.last_output: Dict[str, Any] = {}
@@ -135,27 +145,29 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
                 i2r_att=i2r_outputs,
                 r2i_att=r2i_outputs
             )
+            print(f"Shape after MultiScaleLatentQueryFusion: {shared_fused_feature.shape}")
 
             for t in range(self.num_tasks):
                 # MTAN
                 attention_mask = self.mtan_attention_layers[t](shared_fused_feature)
                 task_attended_feature = shared_fused_feature * attention_mask
+                print(f"Shape after MTAN for task {t}: {task_attended_feature.shape}")
                 # MoE
-                expert_output = self.post_fusion_moe(task_attended_feature, task_id=t)
+                expert_output = self.post_fusion_moe(task_attended_feature, task_id=t).squeeze(1)
+                print(f"Shape after MoE for task {t}: {expert_output.shape}")
                 task_specific_feature = task_attended_feature + expert_output
                 task_feats.append(task_specific_feature)
 
         else:
             device = next(self.parameters()).device
-            task_feats = [torch.zeros(1, self.hidden_dim, device=device) for _ in range(self.num_tasks)]
+            task_feats = [torch.zeros(img_features.shape[0], self.fused_dim, device=device) for _ in range(self.num_tasks)]
         
         logits: List[torch.Tensor] = []
         probs: List[torch.Tensor] = []
 
         for idx, clf in enumerate(self.task_classifiers):
             feat = task_feats[idx]
-            feat_flattened = feat.view(feat.size(0), -1)
-            logit = clf(feat_flattened)
+            logit = clf(feat)
             logits.append(logit)
             
             if self.classification_type == "binary" and logit.size(-1) == 1:

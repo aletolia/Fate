@@ -313,9 +313,9 @@ class MultiScaleLatentQueryFusion(nn.Module):
             scale_outputs.append(fused_output)
 
         merged_output = torch.cat(scale_outputs, dim=1) # (B, sum(latent_scales), D)
+        # flaten to (B, sum(latent_scales) * D)
+        return merged_output.flatten(start_dim=1)
 
-        return merged_output
-    
 # ==========================
 # ===== dataset utils ======
 # ==========================

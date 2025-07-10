@@ -276,7 +276,7 @@ class MultiScaleLatentQueryFusion(nn.Module):
                  dropout: float = 0.1):
         super().__init__()
         self.latent_scales = latent_scales
-        # TODO:multi initialize way choose(kaiming or xavier) 
+
         self.queries = nn.ParameterList(
             [nn.Parameter(torch.randn(1, n_queries, dim)) for n_queries in latent_scales]
         )
@@ -313,9 +313,9 @@ class MultiScaleLatentQueryFusion(nn.Module):
             scale_outputs.append(fused_output)
 
         merged_output = torch.cat(scale_outputs, dim=1) # (B, sum(latent_scales), D)
+        # flaten to (B, sum(latent_scales) * D)
+        return merged_output.flatten(start_dim=1)
 
-        return merged_output
-    
 # ==========================
 # ===== dataset utils ======
 # ==========================

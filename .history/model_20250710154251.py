@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Dict, Any
 from MoE import HierarchicalTaskMoE as DeepseekMoE_TaskSpecificExperts
 from attn import Fate
-from utils import MultiScaleLatentQueryFusion
+from utils import ProposedFusionModule
 
 # MTAN from https://github.com/lorenmt/mtan
 class TaskSpecificAttentionLayer(nn.Module):
@@ -34,11 +34,14 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         dropout: float = 0.3,
         residual_mode: str = "identity",
         fusion_mode: str = "identity",
+        num_latents: int = 512,
+        compress_heads: int = 8,
+        film_hidden_dim: Optional[int] = None,
+        use_projection: bool = True,
         fusion_heads: int = 8,
         classification_type: str = "binary",
         use_uncertainty_weighting: bool = False,
         use_task_norm: bool = False,
-        latent_scales: List[int] = [64, 128, 256],
         config = None,
     ):
         super().__init__()
@@ -47,7 +50,6 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         self.num_tasks = num_tasks
         self.classification_type = classification_type
         self.hidden_dim = hidden_dim
-        self.latent_scales = latent_scales
         expert_mode_attr = getattr(config, 'expert_mode', 'both')
 
         # Loss weighting
@@ -72,9 +74,12 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             ]
         )
         # Fusion
-        self.shared_fusion_module = MultiScaleLatentQueryFusion(
+        self.shared_fusion_module = ProposedFusionModule(
             dim=hidden_dim,
-            latent_scales=self.latent_scales,
+            num_latents=num_latents,
+            compress_heads=compress_heads,
+            film_hidden_dim=film_hidden_dim,
+            use_projection=use_projection,
             fusion_heads=fusion_heads,
             dropout=dropout
         )
@@ -85,18 +90,17 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
 
         # MoE Layers
         self.post_fusion_moe = DeepseekMoE_TaskSpecificExperts(
-            config, num_tasks=self.num_tasks
+            config, num_tasks=self.num_tasks, expert_mode=expert_mode_attr
         )
         
-        classifier_in_dim = sum(self.latent_scales) * hidden_dim
         if classification_type == "all":
             self.task_classifiers = nn.ModuleList()
             num_binary_tasks = 1
             for _ in range(num_binary_tasks):
-                self.task_classifiers.append(nn.Linear(classifier_in_dim, 1))
+                self.task_classifiers.append(nn.Linear(hidden_dim, 1))
         else:
             out_dim = 1 if classification_type == "binary" else hidden_dim
-            self.task_classifiers = nn.ModuleList([nn.Linear(classifier_in_dim, out_dim) for _ in range(num_tasks)])
+            self.task_classifiers = nn.ModuleList([nn.Linear(hidden_dim, out_dim) for _ in range(num_tasks)])
 
         self.num_layers = num_layers
         self.last_output: Dict[str, Any] = {}
@@ -154,8 +158,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
 
         for idx, clf in enumerate(self.task_classifiers):
             feat = task_feats[idx]
-            feat_flattened = feat.view(feat.size(0), -1)
-            logit = clf(feat_flattened)
+            logit = clf(feat)
             logits.append(logit)
             
             if self.classification_type == "binary" and logit.size(-1) == 1:
