@@ -1,0 +1,39 @@
+{
+  "os":  "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.18",
+  "startedAt":  "2025-07-11T08:45:44.095433Z",
+  "program":  "/home/aletolia/documents/CPath/Fate/main.py",
+  "codePath":  "main.py",
+  "codePathLocal":  "main.py",
+  "git":  {
+    "remote":  "https://github.com/aletolia/Fate.git",
+    "commit":  "8b3bf53fcfd14d3c39eba7f5cb4362fa519ccd65"
+  },
+  "email":  "1290279498sytzz@gmail.com",
+  "root":  "/home/aletolia/documents/CPath/Fate",
+  "host":  "OneLastKiss",
+  "executable":  "/home/aletolia/anaconda3/envs/fate/bin/python3",
+  "cpu_count":  16,
+  "cpu_count_logical":  32,
+  "gpu":  "NVIDIA GeForce RTX 4090 Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "3697969111040",
+      "used":  "2695980793856"
+    }
+  },
+  "memory":  {
+    "total":  "67222200320"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 4090 Laptop GPU",
+      "memoryTotal":  "17171480576",
+      "architecture":  "Ada",
+      "uuid":  "GPU-ad82f0e4-caf3-2fc8-60f3-531b10042853"
+    }
+  ],
+  "cudaVersion":  "12.3",
+  "writerId":  "379prf68z8kvyeds2kc13jla0q6y09m9"
+}

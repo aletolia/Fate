@@ -39,7 +39,7 @@ def run_epoch(
     pbar = tqdm(dataloader, desc=pbar_desc, leave=False)
 
     for batch in pbar:
-        # try:
+        try:
             batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
             with torch.set_grad_enabled(is_training):
@@ -82,19 +82,14 @@ def run_epoch(
             # --- Live Metrics Update ---
             postfix_dict = {'loss': f'{total_loss.item():.4f}'}
             for i, task_name in enumerate(TASK_CONFIG["names"]):
-                
-                raw_logits = model_output["logits"][i]
-                raw_labels = batch[TASK_CONFIG["label_keys"][i]]
-                logits = torch.atleast_1d(raw_logits)
-                labels = torch.atleast_1d(raw_labels.float())
-                
+                labels = batch[TASK_CONFIG["label_keys"][i]]
                 mask = labels >= 0
                 if not mask.any():
                     continue
 
                 # Store preds and labels for epoch-end metrics
                 valid_labels = labels[mask].cpu()
-                valid_preds = torch.sigmoid(model_output["logits"][i].view(-1)[mask]).detach().cpu()
+                valid_preds = torch.sigmoid(model_output["logits"][i].view(-1)[mask]).cpu()
                 all_labels[task_name].append(valid_labels)
                 all_preds[task_name].append(valid_preds)
                 
@@ -108,17 +103,11 @@ def run_epoch(
                 acc = np.mean((running_preds >= 0.5) == running_labels)
                 postfix_dict[f'{task_name[:4]}_acc'] = f'{acc:.2%}' # Use abbreviated name for cleaner bar
 
-            print(postfix_dict)
             pbar.set_postfix(**postfix_dict)
 
-        # except Exception as e:
-        #     error_log.append({'file_path': batch.get('file_path', 'N/A'), 'error': str(e)})
-        #     print(f"\n[调试信息] 捕获到异常: {e}\n")
-        #     error_log.append({
-        #         'file_path': batch.get('file_path', 'N/A'),
-        #         'error': str(e)
-        #     })
-        #     continue
+        except Exception as e:
+            error_log.append({'file_path': batch.get('file_path', 'N/A'), 'error': str(e)})
+            continue
     
     # --- Final Epoch Metrics Calculation ---
     num_batches = len(dataloader)

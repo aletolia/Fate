@@ -103,20 +103,22 @@ class MGDALoss(nn.Module):
 
     def _get_grads(self, losses):
         """
-        Compute gradients of each task loss with respect to the shared representation.
+        Compute gradients of each task loss with respect to the shared representation
+        using torch.autograd.grad for safety.
         """
         shared_params = [p for p in self.model.parameters() if p.requires_grad]
         
         grads = []
-        for i, loss in enumerate(losses):
-            self.model.zero_grad()
-            loss.backward(retain_graph=True)
+        for loss in losses:
+            # Use torch.autograd.grad to get gradients without populating .grad attributes
+            task_grads_tuple = torch.autograd.grad(loss, shared_params, retain_graph=True, allow_unused=True)
             
-            grad_vec = []
-            for param in shared_params:
-                if param.grad is not None:
-                    grad_vec.append(param.grad.view(-1))
-            grads.append(torch.cat(grad_vec))
+            # Replace None grads with zeros for parameters not used in the task
+            task_grads_filled = [g if g is not None else torch.zeros_like(p) for g, p in zip(task_grads_tuple, shared_params)]
+            
+            # Flatten and concatenate into a single vector for this task
+            grad_vec = torch.cat([g.view(-1) for g in task_grads_filled])
+            grads.append(grad_vec)
         
         return torch.stack(grads)
 
@@ -143,7 +145,7 @@ class MGDALoss(nn.Module):
         task_losses_dict = {}
 
         for i, task_name in enumerate(TASK_CONFIG["names"]):
-            logits = model_output["logits"][i].squeeze()
+            logits = model_output["logits"][i].view(-1)
             labels = batch[TASK_CONFIG["label_keys"][i]].float()
             mask = (labels >= 0)
             

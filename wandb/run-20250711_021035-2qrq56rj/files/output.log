@@ -1,0 +1,7 @@
+Process 14169: Initializing TITAN model...
+
+===== FOLD 1/5 =====
+/home/aletolia/anaconda3/envs/fate/lib/python3.10/site-packages/torch/optim/lr_scheduler.py:28: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn("The verbose parameter is deprecated. Please use get_last_lr() "
+--- Epoch 1/30 ---
+Train:  15%|██████████████████████████████████▌                                                                                                                                                                                                        | 19/129 [00:19<00:09, 11.59it/s]

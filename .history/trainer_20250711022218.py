@@ -94,7 +94,7 @@ def run_epoch(
 
                 # Store preds and labels for epoch-end metrics
                 valid_labels = labels[mask].cpu()
-                valid_preds = torch.sigmoid(model_output["logits"][i].view(-1)[mask]).detach().cpu()
+                valid_preds = torch.sigmoid(model_output["logits"][i].view(-1)[mask]).cpu()
                 all_labels[task_name].append(valid_labels)
                 all_preds[task_name].append(valid_preds)
                 
