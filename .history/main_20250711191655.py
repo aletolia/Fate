@@ -91,14 +91,7 @@ def cross_validation_loop(
             log_payload.update({f"val/{k}": v for k, v in val_metrics.items()})
             wandb.log(log_payload, step=epoch)
 
-            # --- Epoch End Summary ---
-            print(f"  Train Loss: {train_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {train_metrics.get(name + '_acc', 0):.4f}, AUC: {train_metrics.get(name + '_auc', 0):.4f}")
-            
-            print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {val_metrics.get(name + '_acc', 0):.4f}, AUC: {val_metrics.get(name + '_auc', 0):.4f}")
+            print(f"Val Loss: {val_metrics['total_loss']:.4f} | Primary Task Val AUC: {val_metrics.get(TASK_CONFIG['names'][0] + '_auc', 0):.4f}")
             
             primary_val_loss = val_metrics['total_loss']
             scheduler.step(primary_val_loss)

@@ -91,14 +91,7 @@ def cross_validation_loop(
             log_payload.update({f"val/{k}": v for k, v in val_metrics.items()})
             wandb.log(log_payload, step=epoch)
 
-            # --- Epoch End Summary ---
-            print(f"  Train Loss: {train_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {train_metrics.get(name + '_acc', 0):.4f}, AUC: {train_metrics.get(name + '_auc', 0):.4f}")
-            
-            print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {val_metrics.get(name + '_acc', 0):.4f}, AUC: {val_metrics.get(name + '_auc', 0):.4f}")
+            print(f"Val Loss: {val_metrics['total_loss']:.4f} | Primary Task Val AUC: {val_metrics.get(TASK_CONFIG['names'][0] + '_auc', 0):.4f}")
             
             primary_val_loss = val_metrics['total_loss']
             scheduler.step(primary_val_loss)
@@ -134,7 +127,7 @@ def main():
     parser.add_argument('--h5_data_dir', type=str, default='/home/aletolia/documents/code_notes/visualization/MMP/crossTest/output_conch2', help='Directory containing H5 feature files')
     parser.add_argument('--folds_dir', type=str, default='folds_new', help='Directory containing fold definitions')
     parser.add_argument('--loss_weighting_strategy', type=str, default='mgda', choices=['sum', 'dwa', 'mgda'], help='Loss weighting strategy')
-    parser.add_argument('--use_pcgrad', action='store_true', help='Use PCGrad for gradient optimization')
+    parser.add_argument('--use_pcgrad', action='False', help='Use PCGrad for gradient optimization')
     parser.add_argument('--use_diversity_reg', action='store_true', help='Use diversity regularization')
     parser.add_argument('--diversity_beta', type=float, default=1e-4, help='Beta for diversity regularization')
     parser.add_argument('--use_task_norm', action='store_true', help='Use task normalization')

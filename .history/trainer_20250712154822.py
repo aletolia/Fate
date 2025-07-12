@@ -94,10 +94,9 @@ def run_epoch(
                 optimizer.step()
 
             # --- Live Metrics Update ---
-            pbar.set_postfix(loss=f'{total_loss.item():.4f}')
-
-            # --- Collect data for epoch-end metrics ---
+            postfix_dict = {'loss': f'{total_loss.item():.4f}'}
             for i, task_name in enumerate(TASK_CONFIG["names"]):
+                
                 raw_logits = model_output["logits"][i]
                 raw_labels = batch[TASK_CONFIG["label_keys"][i]]
                 logits = torch.atleast_1d(raw_logits)
@@ -115,6 +114,16 @@ def run_epoch(
                 
                 # Update epoch losses
                 epoch_losses[f"{task_name}_loss"] += batch_losses.get(f"{task_name}_loss", 0.0)
+
+                # Calculate running accuracy for the progress bar
+                # We concatenate all seen labels/preds in the epoch for a more stable running accuracy
+                running_labels = torch.cat(all_labels[task_name]).numpy()
+                running_preds = torch.cat(all_preds[task_name]).numpy()
+                acc = np.mean((running_preds >= 0.5) == running_labels)
+                postfix_dict[f'{task_name[:4]}_acc'] = f'{acc:.2%}' # Use abbreviated name for cleaner bar
+
+            print(postfix_dict)
+            pbar.set_postfix(**postfix_dict)
 
         # except Exception as e:
         #     error_log.append({'file_path': batch.get('file_path', 'N/A'), 'error': str(e)})
