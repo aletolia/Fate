@@ -8,6 +8,7 @@ class TrainingFlags:
     loss_weighting_strategy: str = "mgda"
     use_pcgrad: bool = True
     use_diversity_reg: bool = False
+    use_cross_attention: bool = True
     diversity_beta: float = 1e-4
 
     # if use task norm
@@ -22,7 +23,7 @@ class TrainingFlags:
     seed: int = 42
 
     # Early Stopping & DWA
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 5
     early_stopping_delta: float = 1e-4
     dwa_temperature: float = 2.0
 

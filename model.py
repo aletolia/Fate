@@ -38,6 +38,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         classification_type: str = "binary",
         use_uncertainty_weighting: bool = False,
         use_task_norm: bool = False,
+        use_cross_attention: bool = True,
         latent_scales: List[int] = [64, 128, 256],
         config = None,
     ):
@@ -46,6 +47,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         # Parameters
         self.num_tasks = num_tasks
         self.classification_type = classification_type
+        self.use_cross_attention = use_cross_attention
         self.hidden_dim = hidden_dim
         self.latent_scales = latent_scales
         expert_mode_attr = getattr(config, 'expert_mode', 'both')
@@ -112,15 +114,21 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
         final_attn_outputs: Optional[Dict[str, torch.Tensor]] = None
 
         # Caculate attention outputs
-        for i, block in enumerate(self.cross_attn_layers):
-            attn_out = block(img_features=cur_img, text_feats=cur_txt)
-            final_attn_outputs = attn_out
-            img_context, text_context = attn_out.get('img_to_text'), attn_out.get('text_to_img')
-            
-            if i < self.num_layers - 1:
-                if img_context is not None: cur_img = img_context
-                if text_context is not None:
-                    cur_txt = text_context.mean(dim=1) if text_context.dim() > 2 else text_context
+        if self.use_cross_attention:
+            for i, block in enumerate(self.cross_attn_layers):
+                attn_out = block(img_features=cur_img, text_feats=cur_txt)
+                final_attn_outputs = attn_out
+                img_context, text_context = attn_out.get('img_to_text'), attn_out.get('text_to_img')
+                
+                if i < self.num_layers - 1:
+                    if img_context is not None: cur_img = img_context
+                    if text_context is not None:
+                        cur_txt = text_context.mean(dim=1) if text_context.dim() > 2 else text_context
+        else:
+            final_attn_outputs = {
+                'img_to_text': cur_img,
+                'text_to_img': cur_txt
+            }
         
         task_feats: List[torch.Tensor] = []
         if final_attn_outputs is not None and \
