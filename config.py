@@ -15,6 +15,13 @@ class TrainingFlags:
     use_task_norm: bool = False
     use_sampler: bool = False
 
+    # Loss Function Options
+    loss_function: str = 'bce' # 'bce', 'focal', 'sce'
+    focal_loss_alpha: float = 0.25
+    focal_loss_gamma: float = 2.0
+    sce_alpha: float = 1.0
+    sce_beta: float = 1.0
+
     # Parameters
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
@@ -35,12 +42,6 @@ class TrainingFlags:
 TASK_CONFIG = {
     "names": ["cancer", "lymph", "vascular", "perineural"],
     "label_keys": ["label", "lymph_node_label", "vascular_thrombus", "perineural_invasion"],
-    "criteria": {
-        "cancer": nn.BCEWithLogitsLoss(),
-        "lymph": nn.BCEWithLogitsLoss(),
-        "vascular": nn.BCEWithLogitsLoss(),
-        "perineural": nn.BCEWithLogitsLoss(),
-    }
 }
 NUM_TASKS = len(TASK_CONFIG["names"])
 

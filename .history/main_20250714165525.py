@@ -63,7 +63,7 @@ def cross_validation_loop(
     if not fold_dirs:
         raise FileNotFoundError(f"No fold directories found in {flags.folds_dir}")
 
-    wandb.init(project=flags.wandb_project, name=flags.wandb_run_name, config=dataclasses.asdict(flags), mode="offline")
+    wandb.init(project=flags.wandb_project, name=flags.wandb_run_name, config=dataclasses.asdict(flags))
 
     filename_to_idx = {item["original_filename"]: idx for idx, item in enumerate(dataset)}
     all_fold_results = []

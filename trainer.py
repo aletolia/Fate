@@ -4,7 +4,7 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm.autonotebook import tqdm
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
 
 from config import TrainingFlags, TASK_CONFIG, NUM_TASKS
 from utils import DWAKeeper, MGDALoss
@@ -132,15 +132,35 @@ def run_epoch(
     
     for task_name in TASK_CONFIG["names"]:
         if not all_labels[task_name]:
+            metrics[f"{task_name}_acc"] = 0.0
+            metrics[f"{task_name}_f1"] = 0.0
+            metrics[f"{task_name}_auc"] = 0.0
+            metrics[f"{task_name}_sensitivity"] = 0.0
+            metrics[f"{task_name}_specificity"] = 0.0
             continue
         
         labels_cat = torch.cat(all_labels[task_name]).numpy()
         preds_cat = torch.cat(all_preds[task_name]).numpy()
+        preds_binary = preds_cat >= 0.5
         
-        metrics[f"{task_name}_acc"] = np.mean((preds_cat >= 0.5) == labels_cat)
-        metrics[f"{task_name}_f1"] = f1_score(labels_cat, (preds_cat >= 0.5), zero_division=0)
-        if len(np.unique(labels_cat)) > 1: # AUC requires multiple classes
+        metrics[f"{task_name}_acc"] = np.mean(preds_binary == labels_cat)
+        metrics[f"{task_name}_f1"] = f1_score(labels_cat, preds_binary, zero_division=0)
+
+        unique_labels = np.unique(labels_cat)
+        if len(unique_labels) > 1:
             metrics[f"{task_name}_auc"] = roc_auc_score(labels_cat, preds_cat)
+            cm = confusion_matrix(labels_cat, preds_binary, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel()
+            metrics[f"{task_name}_sensitivity"] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            metrics[f"{task_name}_specificity"] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+        else:
+            metrics[f"{task_name}_auc"] = 0.0
+            if unique_labels[0] == 1:
+                metrics[f"{task_name}_sensitivity"] = np.mean(preds_binary == 1)
+                metrics[f"{task_name}_specificity"] = 0.0
+            else:
+                metrics[f"{task_name}_sensitivity"] = 0.0
+                metrics[f"{task_name}_specificity"] = np.mean(preds_binary == 0)
 
     # Update DWA keeper with validation losses for the next training epoch
     if not is_training and flags.loss_weighting_strategy == "dwa" and dwa_keeper:
