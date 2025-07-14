@@ -150,7 +150,7 @@ def main():
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description='Multi-Task Learning Framework for Pathological Analysis')
     parser.add_argument('--csv_label_path', type=str, default='/root/pathReport_modified_cleaned.csv', help='Path to the CSV file containing additional labels')
-    parser.add_argument('--h5_data_dir', type=str, default='/root/autodl-tmp/output_conch', help='Directory containing H5 feature files')
+    parser.add_argument('--h5_data_dir', type=str, default='/home/aletolia/documents/code_notes/visualization/MMP/crossTest/output_conch2', help='Directory containing H5 feature files')
     parser.add_argument('--folds_dir', type=str, default='folds_new', help='Directory containing fold definitions')
     
     # Task and Model Options
