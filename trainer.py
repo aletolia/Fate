@@ -14,13 +14,19 @@ def _calculate_loss(
     batch: Dict[str, Any],
     task_criteria: Dict[str, nn.Module],
     device: torch.device,
+    active_tasks: List[str],
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Calculates losses for each task and returns the unweighted tensor and a dict of scalar losses."""
+    """Calculates losses for each active task and returns the unweighted tensor and a dict of scalar losses."""
     task_losses = []
     batch_losses = {}
-    for i, task_name in enumerate(TASK_CONFIG["names"]):
-        logits = model_output["logits"][i].view(-1)
-        labels = batch[TASK_CONFIG["label_keys"][i]].float().view(-1)
+    
+    # Map active task names to their original indices in the model output
+    task_to_idx = {name: i for i, name in enumerate(TASK_CONFIG["names"])}
+
+    for task_name in active_tasks:
+        task_idx = task_to_idx[task_name]
+        logits = model_output["logits"][task_idx].view(-1)
+        labels = batch[TASK_CONFIG["label_keys"][task_idx]].float().view(-1)
         mask = labels >= 0  # Ignore samples with label -1
 
         if mask.any():
@@ -28,6 +34,7 @@ def _calculate_loss(
             task_losses.append(loss_i)
             batch_losses[f"{task_name}_loss"] = loss_i.item()
         else:
+            # Still need to append a tensor to maintain order for weighting
             task_losses.append(torch.tensor(0.0, device=device))
             batch_losses[f"{task_name}_loss"] = 0.0
 
@@ -38,99 +45,89 @@ def run_epoch(
     dataloader: DataLoader,
     device: torch.device,
     flags: TrainingFlags,
+    active_tasks: List[str],  # Changed from Optional to required
     optimizer: Optional[torch.optim.Optimizer] = None,
     task_criteria: Optional[Dict[str, nn.Module]] = None,
     dwa_keeper: Optional[DWAKeeper] = None,
 ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
-    """Runs a single epoch of training or validation, displaying live metrics."""
+    """Runs a single epoch of training or validation for a given set of active tasks."""
     is_training = optimizer is not None
     model.train(is_training)
 
-    epoch_losses = {f"{task}_loss": 0.0 for task in TASK_CONFIG["names"]}
-    all_preds = {task: [] for task in TASK_CONFIG["names"]}
-    all_labels = {task: [] for task in TASK_CONFIG["names"]}
+    # Initialize metrics only for the active tasks for this epoch
+    epoch_losses = {f"{task}_loss": 0.0 for task in active_tasks}
+    all_preds = {task: [] for task in active_tasks}
+    all_labels = {task: [] for task in active_tasks}
     error_log = []
 
     mgda_loss_fn = MGDALoss(model, device) if is_training and flags.loss_weighting_strategy == 'mgda' else None
     
-    # Pre-calculate DWA weights for the entire epoch
     dwa_weights = None
     if is_training and flags.loss_weighting_strategy == "dwa" and dwa_keeper is not None:
         dwa_weights = dwa_keeper.compute_weights(dwa_keeper.prev_losses).to(device)
 
-    # Use a description that reflects the mode (Train/Val)
-    pbar_desc = f"{'Train' if is_training else 'Val'}"
+    pbar_desc = f"{'Train' if is_training else 'Val'} (Tasks: {len(active_tasks)}/{NUM_TASKS})"
     pbar = tqdm(dataloader, desc=pbar_desc, leave=False)
 
+    # Map active task names to their original indices
+    task_to_idx = {name: i for i, name in enumerate(TASK_CONFIG["names"])}
+
     for batch in pbar:
-        # try:
-            batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-            with torch.set_grad_enabled(is_training):
-                model_output = model(
-                    img_features=batch["image"],
-                    text_feats=batch["text_feat"],
-                    missing_modality=batch["missing_modality"],
-                )
+        with torch.set_grad_enabled(is_training):
+            model_output = model(
+                img_features=batch["image"],
+                text_feats=batch["text_feat"],
+                missing_modality=batch["missing_modality"],
+            )
+            
+            if mgda_loss_fn:
+                # Note: MGDALoss might need adjustment to work with active_tasks
+                total_loss, batch_losses = mgda_loss_fn(model_output, batch, task_criteria)
+            else:
+                task_losses_tensor, batch_losses = _calculate_loss(model_output, batch, task_criteria, device, active_tasks)
                 
-                # --- Loss Calculation ---
-                if mgda_loss_fn:
-                    total_loss, batch_losses = mgda_loss_fn(model_output, batch, task_criteria)
-                else:
-                    task_losses_tensor, batch_losses = _calculate_loss(model_output, batch, task_criteria, device)
-                    if dwa_weights is not None:
-                        total_loss = (task_losses_tensor * dwa_weights).sum()
-                    else:  # Default to simple sum
-                        total_loss = task_losses_tensor.sum()
-                
-                    if dwa_weights is not None:
-                        total_loss = (task_losses_tensor * dwa_weights).sum()
-                    else: # Default to simple sum
-                        total_loss = task_losses_tensor.sum()
+                # Apply weighting only to the losses of active tasks
+                if dwa_weights is not None:
+                    active_task_indices = [task_to_idx[t] for t in active_tasks]
+                    active_dwa_weights = dwa_weights[active_task_indices]
+                    total_loss = (task_losses_tensor * active_dwa_weights).sum()
+                else:  # Default to simple sum
+                    total_loss = task_losses_tensor.sum()
 
-            if is_training:
-                optimizer.zero_grad(set_to_none=True)
-                total_loss.backward()
-                optimizer.step()
+        if is_training:
+            optimizer.zero_grad(set_to_none=True)
+            total_loss.backward()
+            optimizer.step()
 
-            # --- Live Metrics Update ---
-            pbar.set_postfix(loss=f'{total_loss.item():.4f}')
+        pbar.set_postfix(loss=f'{total_loss.item():.4f}')
 
-            # --- Collect data for epoch-end metrics ---
-            for i, task_name in enumerate(TASK_CONFIG["names"]):
-                raw_logits = model_output["logits"][i]
-                raw_labels = batch[TASK_CONFIG["label_keys"][i]]
-                logits = torch.atleast_1d(raw_logits)
-                labels = torch.atleast_1d(raw_labels.float())
-                
-                mask = labels >= 0
-                if not mask.any():
-                    continue
+        for task_name in active_tasks:
+            task_idx = task_to_idx[task_name]
+            raw_logits = model_output["logits"][task_idx]
+            raw_labels = batch[TASK_CONFIG["label_keys"][task_idx]]
+            logits = torch.atleast_1d(raw_logits)
+            labels = torch.atleast_1d(raw_labels.float())
+            
+            mask = labels >= 0
+            if not mask.any():
+                continue
 
-                # Store preds and labels for epoch-end metrics
-                valid_labels = labels[mask].cpu()
-                valid_preds = torch.sigmoid(model_output["logits"][i].view(-1)[mask]).detach().cpu()
-                all_labels[task_name].append(valid_labels)
-                all_preds[task_name].append(valid_preds)
-                
-                # Update epoch losses
-                epoch_losses[f"{task_name}_loss"] += batch_losses.get(f"{task_name}_loss", 0.0)
+            valid_labels = labels[mask].cpu()
+            valid_preds = torch.sigmoid(model_output["logits"][task_idx].view(-1)[mask]).detach().cpu()
+            all_labels[task_name].append(valid_labels)
+            all_preds[task_name].append(valid_preds)
+            
+            epoch_losses[f"{task_name}_loss"] += batch_losses.get(f"{task_name}_loss", 0.0)
 
-        # except Exception as e:
-        #     error_log.append({'file_path': batch.get('file_path', 'N/A'), 'error': str(e)})
-        #     print(f"\n[调试信息] 捕获到异常: {e}\n")
-        #     error_log.append({
-        #         'file_path': batch.get('file_path', 'N/A'),
-        #         'error': str(e)
-        #     })
-        #     continue
-    
-    # --- Final Epoch Metrics Calculation ---
     num_batches = len(dataloader)
     metrics = {key: val / num_batches for key, val in epoch_losses.items()}
-    metrics["total_loss"] = sum(metrics.values())
+    # Note: total_loss here is the average of the sum of active task losses
+    metrics["total_loss"] = sum(metrics.values()) 
     
-    for task_name in TASK_CONFIG["names"]:
+    # Calculate final metrics only for active tasks
+    for task_name in active_tasks:
         if not all_labels[task_name]:
             metrics[f"{task_name}_acc"] = 0.0
             metrics[f"{task_name}_f1"] = 0.0

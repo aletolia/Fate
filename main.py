@@ -50,8 +50,8 @@ def cross_validation_loop(
     model_class: type, 
     model_config: Any, 
     flags: TrainingFlags,
-    ):
-    """Main loop for k-fold cross-validation."""
+):
+    """Main loop for k-fold cross-validation with curriculum learning and task-level early stopping."""
     # --- Setup ---
     torch.manual_seed(flags.seed)
     np.random.seed(flags.seed)
@@ -59,6 +59,15 @@ def cross_validation_loop(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(flags.output_dir, exist_ok=True)
     
+    # --- Curriculum and Task-level Early Stopping Setup ---
+    # Define the curriculum: epoch -> list of tasks to be active
+    # Tasks not in the curriculum will be added at epoch 1 by default.
+    CURRICULUM_SCHEDULE = {
+        1: ["cancer"],  # Start with the 'cancer' task
+        5: ["cancer", "lymph"], # Add 'lymph' at epoch 5
+        10: ["cancer", "lymph", "vascular", "perineural"], # Add the rest at epoch 10
+    }
+
     fold_dirs = sorted([d for d in os.listdir(flags.folds_dir) if re.match(r"fold_\d+", d)])
     if not fold_dirs:
         raise FileNotFoundError(f"No fold directories found in {flags.folds_dir}")
@@ -93,17 +102,45 @@ def cross_validation_loop(
         criterion = _build_loss_criterion(flags)
         task_criteria = {name: criterion.to(device) for name in TASK_CONFIG["names"]}
 
-        early_stopper = EarlyStopping(patience=flags.early_stopping_patience, delta=flags.early_stopping_delta)
-        dwa_keeper = DWAKeeper(NUM_TASKS, flags.dwa_temperature) if flags.loss_weighting_strategy == "dwa" else None
+        # Task-level early stoppers
+        task_stoppers = {
+            name: EarlyStopping(patience=flags.early_stopping_patience, delta=flags.early_stopping_delta)
+            for name in TASK_CONFIG["names"]
+        }
+        active_tasks = [] # Start with no active tasks
         
+        dwa_keeper = DWAKeeper(NUM_TASKS, flags.dwa_temperature) if flags.loss_weighting_strategy == "dwa" else None
         best_val_loss = float('inf')
 
         # --- Epoch Loop ---
         all_error_logs = []
         for epoch in range(flags.num_epochs):
-            print(f"--- Epoch {epoch+1}/{flags.num_epochs} ---")
-            train_metrics, train_errors = run_epoch(model, train_loader, device, flags, optimizer, task_criteria, dwa_keeper)
-            val_metrics, val_errors = run_epoch(model, val_loader, device, flags, None, task_criteria, dwa_keeper)
+            current_epoch = epoch + 1
+            print(f"--- Epoch {current_epoch}/{flags.num_epochs} ---")
+
+            # --- Curriculum Learning: Update active tasks ---
+            newly_activated_tasks = []
+            if current_epoch in CURRICULUM_SCHEDULE:
+                tasks_to_activate = CURRICULUM_SCHEDULE[current_epoch]
+                for task in tasks_to_activate:
+                    if task not in active_tasks:
+                        active_tasks.append(task)
+                        newly_activated_tasks.append(task)
+            if not active_tasks: # Ensure at least one task is active from epoch 1
+                 if 1 in CURRICULUM_SCHEDULE:
+                      active_tasks.extend(CURRICULUM_SCHEDULE[1])
+                      newly_activated_tasks.extend(CURRICULUM_SCHEDULE[1])
+
+            if newly_activated_tasks:
+                print(f"Epoch {current_epoch}: Activating tasks -> {newly_activated_tasks}")
+            
+            if not active_tasks:
+                print("All tasks have been early-stopped. Ending training for this fold.")
+                break
+
+            # --- Run Epoch for Active Tasks ---
+            train_metrics, train_errors = run_epoch(model, train_loader, device, flags, active_tasks, optimizer, task_criteria, dwa_keeper)
+            val_metrics, val_errors = run_epoch(model, val_loader, device, flags, active_tasks, None, task_criteria, dwa_keeper)
             
             # --- Logging and Checkpointing ---
             log_payload = {f"train/{k}": v for k, v in train_metrics.items()}
@@ -111,27 +148,36 @@ def cross_validation_loop(
             wandb.log(log_payload, step=epoch)
 
             # --- Epoch End Summary ---
-            print(f"  Train Loss: {train_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {train_metrics.get(name + '_acc', 0):.4f}, AUC: {train_metrics.get(name + '_auc', 0):.4f}, F1: {train_metrics.get(name + '_f1', 0):.4f}, Sens: {train_metrics.get(name + '_sensitivity', 0):.4f}, Spec: {train_metrics.get(name + '_specificity', 0):.4f}")
+            print(f"  Train Loss (Active Avg): {train_metrics.get('total_loss', 0):.4f}")
+            for name in active_tasks:
+                print(f"    {name} -> Acc: {train_metrics.get(name + '_acc', 0):.4f}, AUC: {train_metrics.get(name + '_auc', 0):.4f}, F1: {train_metrics.get(name + '_f1', 0):.4f}")
             
-            print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
-            for name in TASK_CONFIG["names"]:
-                print(f"    {name} -> Acc: {val_metrics.get(name + '_acc', 0):.4f}, AUC: {val_metrics.get(name + '_auc', 0):.4f}, F1: {val_metrics.get(name + '_f1', 0):.4f}, Sens: {val_metrics.get(name + '_sensitivity', 0):.4f}, Spec: {val_metrics.get(name + '_specificity', 0):.4f}")
+            print(f"  Val Loss (Active Avg): {val_metrics.get('total_loss', 0):.4f}")
+            for name in active_tasks:
+                print(f"    {name} -> Acc: {val_metrics.get(name + '_acc', 0):.4f}, AUC: {val_metrics.get(name + '_auc', 0):.4f}, F1: {val_metrics.get(name + '_f1', 0):.4f}")
             
-            primary_val_loss = val_metrics['total_loss']
+            # --- Task-level Early Stopping Check ---
+            tasks_to_stop = []
+            for task_name in active_tasks:
+                task_val_loss = val_metrics.get(f"{task_name}_loss", float('inf'))
+                if task_stoppers[task_name](task_val_loss):
+                    print(f"  -> Early stopping triggered for task: '{task_name}' at epoch {current_epoch}")
+                    tasks_to_stop.append(task_name)
+            
+            if tasks_to_stop:
+                active_tasks = [t for t in active_tasks if t not in tasks_to_stop]
+
+            # --- Scheduler and Model Saving (based on average val loss of active tasks) ---
+            primary_val_loss = val_metrics.get('total_loss', float('inf'))
             scheduler.step(primary_val_loss)
 
             if primary_val_loss < best_val_loss:
                 best_val_loss = primary_val_loss
                 torch.save(model.state_dict(), os.path.join(fold_output_dir, f"best_model_fold_{fold_idx+1}.pt"))
-                print(f"Saved best model for fold {fold_idx+1}")
-
-            if early_stopper(primary_val_loss):
-                break
+                print(f"Saved best model for fold {fold_idx+1} (Active Val Loss: {best_val_loss:.4f})")
 
         # --- Final Fold Evaluation ---
-        all_fold_results.append(val_metrics)
+        all_fold_results.append(val_metrics) # Note: This now contains metrics for the last active tasks
         all_error_logs.extend(train_errors)
         all_error_logs.extend(val_errors)
         
