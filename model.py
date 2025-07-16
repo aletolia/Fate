@@ -66,7 +66,7 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
                     dim=hidden_dim,
                     layer_idx=i, total_layers=num_layers,
                     residual_mode=residual_mode, fusion_mode=fusion_mode,
-                    num_tasks=num_tasks, use_task_norm=use_task_norm,
+                    num_tasks=num_tasks, use_task_norm=False, # Disable TaskNorm in Fate
                     heads=fusion_heads, dropout=dropout, num_ts_tokens=0,
                     learn_ts_tokens=False, add_ts_tokens_in_first_half=False,
                 )
@@ -80,6 +80,14 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             fusion_heads=fusion_heads,
             dropout=dropout
         )
+
+        # Task-specific normalization layer
+        if use_task_norm:
+            self.task_norm_layers = nn.ModuleList(
+                [nn.LayerNorm(hidden_dim) for _ in range(self.num_tasks)]
+            )
+        else:
+            self.task_norm_layers = None
 
         self.mtan_attention_layers = nn.ModuleList(
             [TaskSpecificAttentionLayer(dim=hidden_dim) for _ in range(self.num_tasks)]
@@ -145,9 +153,16 @@ class MultiTaskModelWithPerTaskFusion(nn.Module):
             )
 
             for t in range(self.num_tasks):
-                # MTAN
-                attention_mask = self.mtan_attention_layers[t](shared_fused_feature)
-                task_attended_feature = shared_fused_feature * attention_mask
+                # Apply Task-Specific Normalization
+                if self.task_norm_layers is not None:
+                    task_normed_feature = self.task_norm_layers[t](shared_fused_feature)
+                else:
+                    task_normed_feature = shared_fused_feature
+
+                # MTAN now operates on the task-normed feature
+                attention_mask = self.mtan_attention_layers[t](task_normed_feature)
+                task_attended_feature = task_normed_feature * attention_mask
+                
                 # MoE
                 expert_output = self.post_fusion_moe(task_attended_feature, task_id=t)
                 task_specific_feature = task_attended_feature + expert_output

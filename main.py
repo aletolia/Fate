@@ -35,7 +35,7 @@ def _build_loss_criterion(flags: TrainingFlags) -> nn.Module:
     """Builds the loss function based on the provided flags."""
     if flags.loss_function == 'focal':
         print(f"Using Focal Loss (alpha={flags.focal_loss_alpha}, gamma={flags.focal_loss_gamma})")
-        return FocalLoss(alpha=flags.focal_loss_alpha, gamma=flags.focal_loss_gamma)
+        return FocalLoss(alpha=flags.focal_loss_alpha, gamma=flags.focal_loss_gamma, reduction="none")
     elif flags.loss_function == 'sce':
         print(f"Using Symmetric Cross Entropy (alpha={flags.sce_alpha}, beta={flags.sce_beta})")
         return SymmetricCrossEntropyLoss(alpha=flags.sce_alpha, beta=flags.sce_beta)

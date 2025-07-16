@@ -85,10 +85,7 @@ class Fate(nn.Module):
         else:
              self.task_specific_tokens = None
 
-        if use_task_norm:
-            self.task_norm = nn.ModuleList([nn.LayerNorm(dim) for _ in range(self.num_tasks)])
-        else:
-            self.task_norm = None
+        self.task_norm = None
 
         if self.fusion_mode not in ["moe", "identity", "none"]:
             self.res_proj = nn.Linear(self.dim, self.dim)
@@ -184,13 +181,8 @@ class Fate(nn.Module):
         text_ctx_with_residual = self._add_residual(text_using_img_ctx, text_query)
         img_ctx_with_residual = self._add_residual(img_using_text_ctx, img_proj)
 
-        if self.task_norm is not None:
-            valid_task_id = task_id % self.num_tasks
-            text_ctx_final = self.task_norm[valid_task_id](text_ctx_with_residual)
-            img_ctx_final = self.task_norm[valid_task_id](img_ctx_with_residual)
-        else:
-            text_ctx_final = text_ctx_with_residual
-            img_ctx_final = img_ctx_with_residual
+        text_ctx_final = text_ctx_with_residual
+        img_ctx_final = img_ctx_with_residual
 
         aggregated_feature = None # Default to None
         if self.fusion_mode == "full" or self.fusion_mode == "concat":
