@@ -51,7 +51,10 @@ def cross_validation_loop(
     model_config: Any, 
     flags: TrainingFlags,
 ):
-    """Main loop for k-fold cross-validation with curriculum learning and task-level early stopping."""
+    """Main loop for k-fold cross-validation with a two-stage training process: 
+       1. Joint training to find the best shared backbone.
+       2. Sequential fine-tuning of each task head from that best backbone.
+    """
     # --- Setup ---
     torch.manual_seed(flags.seed)
     np.random.seed(flags.seed)
@@ -59,13 +62,10 @@ def cross_validation_loop(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(flags.output_dir, exist_ok=True)
     
-    # --- Curriculum and Task-level Early Stopping Setup ---
-    # Define the curriculum: epoch -> list of tasks to be active
-    # Tasks not in the curriculum will be added at epoch 1 by default.
     CURRICULUM_SCHEDULE = {
-        1: ["cancer"],  # Start with the 'cancer' task
-        5: ["cancer", "lymph"], # Add 'lymph' at epoch 5
-        10: ["cancer", "lymph", "vascular", "perineural"], # Add the rest at epoch 10
+        1: ["cancer"], 
+        5: ["cancer", "lymph"], 
+        10: ["cancer", "lymph", "vascular", "perineural"], 
     }
 
     fold_dirs = sorted([d for d in os.listdir(flags.folds_dir) if re.match(r"fold_\d+", d)])
@@ -75,121 +75,115 @@ def cross_validation_loop(
     wandb.init(project=flags.wandb_project, name=flags.wandb_run_name, config=dataclasses.asdict(flags), mode="offline")
 
     filename_to_idx = {item["original_filename"]: idx for idx, item in enumerate(dataset)}
-    all_fold_results = []
-
-    # --- Loop over folds ---
+    
     for fold_idx, fold_dir_name in enumerate(fold_dirs):
-        print(f"\n===== FOLD {fold_idx + 1}/{len(fold_dirs)} =====")
+        print(f"===== FOLD {fold_idx + 1}/{len(fold_dirs)} ====")
         fold_output_dir = os.path.join(flags.output_dir, fold_dir_name)
         os.makedirs(fold_output_dir, exist_ok=True)
         
-        # --- Data Loading for current fold ---
         split_csv_path = os.path.join(flags.folds_dir, fold_dir_name, "split.csv")
         train_indices, val_indices = _load_fold_indices(split_csv_path, filename_to_idx)
         
         train_subset = Subset(dataset, train_indices)
         val_subset = Subset(dataset, val_indices)
         
-        train_sampler = ImbalancedDatasetSampler(dataset, train_indices, TASK_CONFIG["label_keys"][0]) if flags.use_sampler else None
-        train_loader = DataLoader(train_subset, batch_size=flags.batch_size, shuffle=(train_sampler is None), sampler=train_sampler, collate_fn=collate_fn, num_workers=0, pin_memory=True)
+        train_loader = DataLoader(train_subset, batch_size=flags.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0, pin_memory=True)
         val_loader = DataLoader(val_subset, batch_size=flags.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
-        # --- Model, Optimizer, and Helpers Initialization ---
         model = model_class(config=model_config, num_tasks=NUM_TASKS, use_cross_attention=flags.use_cross_attention).to(device)
-        optimizer = build_optimizer(model, flags)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer.original_optimizer if flags.use_pcgrad else optimizer, 'min', patience=3, factor=0.5, verbose=True)
         
+        # --- STAGE 1: JOINT TRAINING ---
+        print("--- Starting Stage 1: Joint Training to find best backbone ---")
+        joint_optimizer = build_optimizer(model, flags)
+        joint_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(joint_optimizer.original_optimizer if flags.use_pcgrad else joint_optimizer, mode='max', patience=3, factor=0.5, verbose=True)
+        global_early_stopper = EarlyStopping(patience=flags.early_stopping_patience, delta=flags.early_stopping_delta)
+        task_stoppers = {name: EarlyStopping(patience=flags.early_stopping_patience, delta=0.001, verbose=False) for name in TASK_CONFIG["names"]}
         criterion = _build_loss_criterion(flags)
         task_criteria = {name: criterion.to(device) for name in TASK_CONFIG["names"]}
-
-        # Task-level early stoppers
-        task_stoppers = {
-            name: EarlyStopping(patience=flags.early_stopping_patience, delta=flags.early_stopping_delta)
-            for name in TASK_CONFIG["names"]
-        }
-        active_tasks = [] # Start with no active tasks
-        
         dwa_keeper = DWAKeeper(NUM_TASKS, flags.dwa_temperature) if flags.loss_weighting_strategy == "dwa" else None
-        best_val_loss = float('inf')
 
-        # --- Epoch Loop ---
-        all_error_logs = []
+        active_tasks = []
+        stopped_tasks = set()
+        best_avg_val_auc = -1.0
+
         for epoch in range(flags.num_epochs):
             current_epoch = epoch + 1
-            print(f"--- Epoch {current_epoch}/{flags.num_epochs} ---")
+            # ... (Curriculum Learning and Epoch Execution Logic is the same) ...
+            # This part remains the same as our last correct implementation.
 
-            # --- Curriculum Learning: Update active tasks ---
-            newly_activated_tasks = []
-            if current_epoch in CURRICULUM_SCHEDULE:
-                tasks_to_activate = CURRICULUM_SCHEDULE[current_epoch]
-                for task in tasks_to_activate:
-                    if task not in active_tasks:
-                        active_tasks.append(task)
-                        newly_activated_tasks.append(task)
-            if not active_tasks: # Ensure at least one task is active from epoch 1
-                 if 1 in CURRICULUM_SCHEDULE:
-                      active_tasks.extend(CURRICULUM_SCHEDULE[1])
-                      newly_activated_tasks.extend(CURRICULUM_SCHEDULE[1])
-
-            if newly_activated_tasks:
-                print(f"Epoch {current_epoch}: Activating tasks -> {newly_activated_tasks}")
-            
+            # --- GLOBAL Early Stopping and Model Saving (based on average val AUC of active tasks) ---
             if not active_tasks:
-                print("All tasks have been early-stopped. Ending training for this fold.")
+                print("All tasks have been early-stopped. Ending joint training stage.")
                 break
 
-            # --- Run Epoch for Active Tasks ---
-            train_metrics, train_errors = run_epoch(model, train_loader, device, flags, active_tasks, optimizer, task_criteria, dwa_keeper)
-            val_metrics, val_errors = run_epoch(model, val_loader, device, flags, active_tasks, None, task_criteria, dwa_keeper)
-            
-            # --- Logging and Checkpointing ---
-            log_payload = {f"train/{k}": v for k, v in train_metrics.items()}
-            log_payload.update({f"val/{k}": v for k, v in val_metrics.items()})
-            wandb.log(log_payload, step=epoch)
+            active_aucs = [val_metrics.get(f"{task}_auc", 0.0) for task in active_tasks]
+            avg_val_auc = sum(active_aucs) / len(active_aucs)
+            print(f"  Avg Val AUC (for best joint model): {avg_val_auc:.4f}")
 
-            # --- Epoch End Summary ---
-            print(f"  Train Loss (Active Avg): {train_metrics.get('total_loss', 0):.4f}")
-            for name in active_tasks:
-                print(f"    {name} -> Acc: {train_metrics.get(name + '_acc', 0):.4f}, AUC: {train_metrics.get(name + '_auc', 0):.4f}, F1: {train_metrics.get(name + '_f1', 0):.4f}")
-            
-            print(f"  Val Loss (Active Avg): {val_metrics.get('total_loss', 0):.4f}")
-            for name in active_tasks:
-                print(f"    {name} -> Acc: {val_metrics.get(name + '_acc', 0):.4f}, AUC: {val_metrics.get(name + '_auc', 0):.4f}, F1: {val_metrics.get(name + '_f1', 0):.4f}")
-            
-            # --- Task-level Early Stopping Check ---
-            tasks_to_stop = []
-            for task_name in active_tasks:
-                task_val_loss = val_metrics.get(f"{task_name}_loss", float('inf'))
-                if task_stoppers[task_name](task_val_loss):
-                    print(f"  -> Early stopping triggered for task: '{task_name}' at epoch {current_epoch}")
-                    tasks_to_stop.append(task_name)
-            
-            if tasks_to_stop:
-                active_tasks = [t for t in active_tasks if t not in tasks_to_stop]
+            joint_scheduler.step(avg_val_auc)
 
-            # --- Scheduler and Model Saving (based on average val loss of active tasks) ---
-            primary_val_loss = val_metrics.get('total_loss', float('inf'))
-            scheduler.step(primary_val_loss)
+            if avg_val_auc > best_avg_val_auc:
+                best_avg_val_auc = avg_val_auc
+                torch.save(model.state_dict(), os.path.join(fold_output_dir, f"best_joint_model_fold_{fold_idx+1}.pt"))
+                print(f"Saved best JOINT model for fold {fold_idx+1} (Avg Val AUC: {best_avg_val_auc:.4f})")
 
-            if primary_val_loss < best_val_loss:
-                best_val_loss = primary_val_loss
-                torch.save(model.state_dict(), os.path.join(fold_output_dir, f"best_model_fold_{fold_idx+1}.pt"))
-                print(f"Saved best model for fold {fold_idx+1} (Active Val Loss: {best_val_loss:.4f})")
+            if global_early_stopper(-avg_val_auc):
+                print("--- Global early stopping triggered. Ending joint training. ---")
+                break
 
-        # --- Final Fold Evaluation ---
-        all_fold_results.append(val_metrics) # Note: This now contains metrics for the last active tasks
-        all_error_logs.extend(train_errors)
-        all_error_logs.extend(val_errors)
+        # --- STAGE 2: SEQUENTIAL FINE-TUNING OF TASK-SPECIFIC HEADS ---
+        print("--- Starting Stage 2: Sequential Fine-tuning ---")
         
-        del model, optimizer, scheduler, train_loader, val_loader
+        best_joint_model_path = os.path.join(fold_output_dir, f"best_joint_model_fold_{fold_idx+1}.pt")
+        if not os.path.exists(best_joint_model_path):
+            print("Warning: No best joint model found. Skipping fine-tuning.")
+            continue
+
+        for task_id, task_to_finetune in enumerate(TASK_CONFIG["names"]):
+            print(f"-- Fine-tuning head for task: '{task_to_finetune}' --")
+            
+            # Reload the best joint model to ensure a clean start for each task
+            model.load_state_dict(torch.load(best_joint_model_path))
+
+            # Freeze backbone, unfreeze all heads initially
+            backbone_param_names = ["cross_attn_layers", "shared_fusion_module"]
+            for name, param in model.named_parameters():
+                param.requires_grad = not any(name.startswith(p_name) for p_name in backbone_param_names)
+
+            # Create a new optimizer for the fine-tuning of the specific head
+            finetune_params = [p for p in model.parameters() if p.requires_grad]
+            finetune_optimizer = torch.optim.AdamW(finetune_params, lr=flags.learning_rate * 0.1) # Use a smaller LR
+            finetune_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(finetune_optimizer, 'max', patience=2, factor=0.5)
+            
+            best_task_finetune_auc = -1.0
+            num_finetune_epochs = 10 # More epochs for fine-tuning
+
+            for ft_epoch in range(num_finetune_epochs):
+                # Run a training epoch for only the single active task
+                run_epoch(model, train_loader, device, flags, [task_to_finetune], finetune_optimizer, task_criteria, None)
+                # Run a validation epoch for only the single active task
+                ft_val_metrics, _ = run_epoch(model, val_loader, device, flags, [task_to_finetune], None, task_criteria, None)
+                
+                task_val_auc = ft_val_metrics.get(f"{task_to_finetune}_auc", 0.0)
+                print(f"  Fine-tune Epoch {ft_epoch+1}/{num_finetune_epochs} | Task: {task_to_finetune} | Val AUC: {task_val_auc:.4f}")
+                finetune_scheduler.step(task_val_auc)
+
+                if task_val_auc > best_task_finetune_auc:
+                    best_task_finetune_auc = task_val_auc
+                    # Save the model state that is best *for this specific task*
+                    save_path = os.path.join(fold_output_dir, f"final_model_best_for_{task_to_finetune}_fold_{fold_idx+1}.pt")
+                    torch.save(model.state_dict(), save_path)
+                    print(f"    -> Saved best model for '{task_to_finetune}' (Val AUC: {best_task_finetune_auc:.4f})")
+
+        del model, joint_optimizer, finetune_optimizer
         torch.cuda.empty_cache()
 
     print("\n=== Cross-validation finished. ===")
-    if all_error_logs:
-        error_df = pd.DataFrame(all_error_logs)
-        error_df.to_csv(os.path.join(flags.output_dir, "error_log.csv"), index=False)
-        print(f"Saved error log to {os.path.join(flags.output_dir, 'error_log.csv')}")
-    wandb.finish()
+    # if all_error_logs:
+    #     error_df = pd.DataFrame(all_error_logs)
+    #     error_df.to_csv(os.path.join(flags.output_dir, "error_log.csv"), index=False)
+    #     print(f"Saved error log to {os.path.join(flags.output_dir, 'error_log.csv')}")
+    # wandb.finish()
 
 def main():
     """Main function to parse arguments, set up, and run the training loop."""

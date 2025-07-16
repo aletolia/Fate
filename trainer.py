@@ -84,7 +84,7 @@ def run_epoch(
             
             if mgda_loss_fn:
                 # Note: MGDALoss might need adjustment to work with active_tasks
-                total_loss, batch_losses = mgda_loss_fn(model_output, batch, task_criteria)
+                total_loss, batch_losses = mgda_loss_fn(model_output, batch, task_criteria, active_tasks)
             else:
                 task_losses_tensor, batch_losses = _calculate_loss(model_output, batch, task_criteria, device, active_tasks)
                 

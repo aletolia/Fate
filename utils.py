@@ -140,13 +140,17 @@ class MGDALoss(nn.Module):
         grads = grads / gn.unsqueeze(1)
         return grads
 
-    def forward(self, model_output, batch, task_criteria):
+    def forward(self, model_output, batch, task_criteria, active_tasks: List[str]):
         task_losses = []
         task_losses_dict = {}
 
-        for i, task_name in enumerate(TASK_CONFIG["names"]):
-            logits = model_output["logits"][i].view(-1)
-            labels = batch[TASK_CONFIG["label_keys"][i]].float()
+        # Map active task names to their original indices in the model output
+        task_to_idx = {name: i for i, name in enumerate(TASK_CONFIG["names"])}
+
+        for task_name in active_tasks:
+            task_idx = task_to_idx[task_name]
+            logits = model_output["logits"][task_idx].view(-1)
+            labels = batch[TASK_CONFIG["label_keys"][task_idx]].float()
             mask = (labels >= 0)
             
             if mask.any():
@@ -154,20 +158,23 @@ class MGDALoss(nn.Module):
                 task_losses.append(loss_i)
                 task_losses_dict[f"{task_name}_loss"] = loss_i.item()
             else:
-                # Still append a zero tensor to maintain task count
+                # Still append a zero tensor to maintain task count and order for grads
                 task_losses.append(torch.tensor(0.0, device=self.device, requires_grad=True))
                 task_losses_dict[f"{task_name}_loss"] = 0.0
         
+        if not task_losses: # Handle case where no tasks are active
+            return torch.tensor(0.0, device=self.device), {}
+
         task_losses_tensor = torch.stack(task_losses)
         
-        # Get gradients of each task loss
+        # Get gradients of each active task loss
         grads = self._get_grads(task_losses)
         
         # Normalize gradients
         loss_data = task_losses_tensor.detach().clone()
         grads = self._gradient_normalizers(grads, loss_data)
         
-        # Find the optimal weights
+        # Find the optimal weights for the active tasks
         sol = _find_min_norm_element(grads)
         
         # Compute the weighted loss
@@ -397,13 +404,48 @@ class DWAKeeper:
 
 # Optimizer Builder
 def build_optimizer(model: nn.Module, flags: TrainingFlags) -> torch.optim.Optimizer:
-    """Builds an AdamW optimizer, with optional PCGrad wrapper."""
+    """Builds an AdamW optimizer, with optional PCGrad wrapper and differential learning rates."""
+    
+    # Define parameter groups
+    backbone_param_names = ["cross_attn_layers", "shared_fusion_module"]
+    head_param_names = ["task_norm_layers", "mtan_attention_layers", "post_fusion_moe", "task_classifiers"]
+
+    backbone_params = []
+    head_params = []
+    other_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        
+        is_backbone = any(name.startswith(p_name) for p_name in backbone_param_names)
+        is_head = any(name.startswith(p_name) for p_name in head_param_names)
+
+        if is_backbone:
+            backbone_params.append(param)
+        elif is_head:
+            head_params.append(param)
+        else:
+            other_params.append(param)
+
+    # If there are parameters that don't fit in backbone or heads, add them to heads group
+    if other_params:
+        head_params.extend(other_params)
+
+    param_groups = [
+        {'params': backbone_params, 'lr': flags.learning_rate * 0.1, 'group_name': 'backbone'},
+        {'params': head_params, 'lr': flags.learning_rate, 'group_name': 'heads'}
+    ]
+
+    print(f"Optimizer configured with differential learning rates:")
+    print(f"  - Backbone LR: {flags.learning_rate * 0.1}")
+    print(f"  - Heads LR: {flags.learning_rate}")
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=flags.weight_decay)
+
     if flags.use_pcgrad:
-        return PCGrad(
-            torch.optim.AdamW(model.parameters(), lr=flags.learning_rate, weight_decay=flags.weight_decay),
-            reduction='mean'
-        )
-    return torch.optim.AdamW(model.parameters(), lr=flags.learning_rate, weight_decay=flags.weight_decay)
+        return PCGrad(optimizer, reduction='mean')
+    return optimizer
 
 # Early Stopping
 class EarlyStopping:
